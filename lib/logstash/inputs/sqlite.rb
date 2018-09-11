@@ -65,6 +65,12 @@ class LogStash::Inputs::Sqlite < LogStash::Inputs::Base
   # The path to the sqlite database file.
   config :path, :validate => :string, :required => true
 
+  # The id column in the sqlite database file.
+  config :id_column, :validate => :string, :default => "id"
+  
+  # Exclude tables like this (expr to exclude tables with names like this)
+  config :exclude_tables_like, :validate => :string, :default => "archive_%"
+
   # Any tables to exclude by name.
   # By default all tables are followed.
   config :exclude_tables, :validate => :array, :default => []
@@ -115,13 +121,15 @@ class LogStash::Inputs::Sqlite < LogStash::Inputs::Base
 
   public 
   def get_all_tables(db)
-    return db["SELECT * FROM sqlite_master WHERE type = 'table' AND tbl_name != '#{SINCE_TABLE}' AND tbl_name NOT LIKE 'sqlite_%'"].map { |t| t[:name] }.select { |n| !@exclude_tables.include?(n) }
+    return db["SELECT * FROM sqlite_master WHERE type = 'table' AND tbl_name != '#{SINCE_TABLE}' AND tbl_name NOT LIKE 'sqlite_%' AND tbl_name NOT LIKE '#{@exclude_tables_like}'"].map { |t| t[:name] }.select { |n| !@exclude_tables.include?(n) }
   end
   
   public
   def get_n_rows_from_table(db, table, offset, limit)
+    @logger.debug("get_n_rows_from_table table=#{table}, offset=#{offset}, limit=#{limit}")
     dataset = db["SELECT * FROM #{table}"]
-    return db["SELECT * FROM #{table} WHERE (id > #{offset}) ORDER BY 'id' LIMIT #{limit}"].map { |row| row }
+    @logger.debug("get_n_rows_from_table making second call")
+    return db["SELECT * FROM #{table} WHERE (#{@id_column} > #{offset}) ORDER BY '#{@id_column}' LIMIT #{limit}"].map { |row| row }
   end
   
   public
@@ -155,17 +163,31 @@ class LogStash::Inputs::Sqlite < LogStash::Inputs::Base
           offset = table[:place]
           @logger.debug("offset is #{offset}", :k => k, :table => table_name)
           rows = get_n_rows_from_table(@db, table_name, offset, @batch)
+          @logger.debug("Processing #{rows.count} rows")
           count += rows.count
+          curr_place = 0
           rows.each do |row| 
-            event = LogStash::Event.new("host" => @host, "db" => @db)
+            @logger.debug("Processing row")
+            @logger.debug("Processing row=#{row.inspect}")
+            @logger.debug("Create event with host #{@host} and #{@db}")
+            event = LogStash::Event.new("host" => @host)
+            @logger.debug("Decorating event")
             decorate(event)
+            @logger.debug("Processing row2")
             # store each column as a field in the event.
             row.each do |column, element|
-              next if column == :id
+              @logger.debug("Processing row3, column = #{column} (looking for #{@id_column})")
+              if column.to_s.eql? @id_column
+                curr_place = element
+                @logger.debug("Setting curr_place to #{curr_place})")
+              end
+              @logger.debug("Adding to event")
               event.set(column.to_s, element)
             end
+            @logger.debug("Adding event to queue")
             queue << event
-            @table_data[k][:place] = row[:id]
+            @table_data[k][:place] = curr_place
+            @logger.debug("Setting placeholder ID to #{curr_place}")
           end
           # Store the last-seen row in the database
           update_placeholder(@db, table_name, @table_data[k][:place])
